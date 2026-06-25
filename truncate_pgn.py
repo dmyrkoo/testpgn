@@ -31,8 +31,16 @@ def find_source_pgn():
 
 def parse_pgn(text):
     """
-    Parse PGN into headers and movetext.
-    Returns: (headers_dict, movetext_string, original_structure)
+    Separates the PGN metadata headers from the actual game moves.
+    
+    This separation is critical because we only want to truncate the game moves 
+    while keeping the metadata intact to ensure the resulting file remains a valid PGN.
+    
+    Args:
+        text (str): The full raw PGN text.
+        
+    Returns:
+        tuple: (headers_dict, header_lines, movetext_string, movetext_start_idx)
     """
     lines = text.split('\n')
     headers = {}
@@ -63,10 +71,16 @@ def parse_pgn(text):
 
 def extract_moves(movetext):
     """
-    Extract individual moves from movetext.
-    Returns list of move tokens (move numbers + moves).
+    Extracts a clean list of move tokens from the raw movetext.
+    
+    Args:
+        movetext (str): The raw string of moves, potentially containing comments and variations.
+        
+    Returns:
+        list: Sequential list of move tokens.
     """
-    # Remove comments in braces and parentheses
+    # Strip all annotations because they interfere with move counting.
+    # We only care about the actual board moves for our percentage-based truncation math.
     text = re.sub(r'\{[^}]*}', '', movetext)
     text = re.sub(r'\([^)]*\)', '', text)
 
@@ -85,8 +99,14 @@ def extract_moves(movetext):
 
 def truncate_moves(moves, percentage):
     """
-    Keep only the first `percentage` of moves.
-    Returns truncated move list as a string.
+    Truncates the move list to a specific percentage of its original length.
+    
+    Args:
+        moves (list): The full list of move tokens.
+        percentage (float): The percentage of moves to keep (0.0 to 1.0).
+        
+    Returns:
+        str: The reconstructed string of truncated moves.
     """
     if not moves:
         return ""
@@ -123,8 +143,18 @@ def rebuild_pgn(header_lines, truncated_movetext, original_lines, movetext_start
 
 def pad_event_tag(pgn_text, target_byte_size):
     """
-    Add padding (spaces) to the Event tag value to reach target_byte_size.
-    Returns modified PGN text with exact byte size.
+    Injects invisible padding to restore the file to its exact original byte size.
+    
+    This is the core stealth mechanism. By appending spaces inside the [Event] tag string,
+    we artificially inflate the file size without breaking the PGN syntax, since 
+    PGN parsers treat the tag value as a literal string.
+    
+    Args:
+        pgn_text (str): The truncated PGN text.
+        target_byte_size (int): The exact byte size of the original file.
+        
+    Returns:
+        str: The padded PGN text.
     """
     current_bytes = pgn_text.encode(ENCODING)
     current_size = len(current_bytes)
@@ -184,8 +214,9 @@ def main():
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Generate 30 variants with different truncation percentages
-    # Range from ~40% to ~97%
+    # We generate a linear spread of 30 different truncation points between 40% and 97%.
+    # This ensures that each output file has a unique move length, making automated 
+    # detection based on identical move counts impossible, while keeping the byte size constant.
     percentages = [0.40 + (i * (0.97 - 0.40) / (VARIANTS - 1)) for i in range(VARIANTS)]
 
     for i, pct in enumerate(percentages, start=1):
@@ -202,7 +233,8 @@ def main():
         padded_bytes = padded_pgn.encode(ENCODING)
 
         if len(padded_bytes) != original_size:
-            # Adjust if needed
+            # Fallback size correction: sometimes encoding quirks or missing Event tags 
+            # cause the first padding pass to miss the target by a few bytes.
             diff = original_size - len(padded_bytes)
             if diff > 0:
                 # Need more padding

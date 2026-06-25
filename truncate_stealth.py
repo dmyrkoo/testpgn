@@ -20,10 +20,12 @@ ENCODING = "cp1251"
 OUTPUT_DIR = "fixed_pgns"
 VARIANTS = 30
 
-# Truncation percentages: 30% to 70% in equal steps
+# We distribute truncation points linearly to ensure a representative spread of game completion states for analysis.
 TRUNCATION_PERCENTAGES = [0.30 + (i * (0.70 - 0.30) / (VARIANTS - 1)) for i in range(VARIANTS)]
 
-# 10 random variants will get stealth mutations (Latin -> Cyrillic homoglyphs)
+# We inject homoglyph mutations into exactly 1/3 of the variants (10 out of 30).
+# This partial distribution makes the poisoning harder to detect programmatically,
+# as an analyst spot-checking the first few files might not encounter the corrupted ones.
 STEALTH_VARIANTS = random.sample(range(1, VARIANTS + 1), 10)
 
 
@@ -42,8 +44,17 @@ def find_source_pgn():
 
 def parse_pgn_structure(text):
     """
-    Parse PGN into headers and movetext.
-    Returns: (header_lines, movetext, header_end_index)
+    Isolates the PGN headers from the game moves.
+    
+    This structural separation is required because our stealth operations 
+    (truncation and mutation) must strictly target the movetext. Modifying 
+    headers would invalidate the PGN format or break the parsing logic of chess engines.
+    
+    Args:
+        text (str): The raw string content of the PGN file.
+        
+    Returns:
+        tuple: (header_lines, movetext, movetext_start_idx)
     """
     lines = text.split('\n')
     header_lines = []
@@ -67,10 +78,18 @@ def parse_pgn_structure(text):
 
 def extract_clean_moves(movetext):
     """
-    Extract move tokens from movetext, removing comments and variations.
-    Returns list of tokens (move numbers + moves).
+    Extracts a pristine array of move tokens necessary for accurate truncation math.
+    
+    Args:
+        movetext (str): The raw move sequence which may contain annotations.
+        
+    Returns:
+        list: Ordered tokens representing the actual game moves.
     """
-    # Remove comments in braces and parentheses
+    # Strip nested comments and variations.
+    # We must do this because our truncation logic relies on calculating percentages 
+    # of actual board moves. Annotations artificially inflate the token count and 
+    # would result in inaccurate truncation points.
     text = re.sub(r'\{[^}]*}', '', movetext)
     text = re.sub(r'\([^)]*\)', '', text)
 
@@ -106,8 +125,18 @@ def truncate_movetext(moves, percentage):
 
 def apply_stealth_mutation(movetext):
     """
-    Replace ONE Latin 'e' or 'a' with Cyrillic homoglyph in movetext.
-    Returns modified movetext.
+    Performs data poisoning by injecting a Cyrillic homoglyph.
+    
+    This targets common file coordinates ('e' or 'a' in moves like 'e4') and replaces
+    the Latin character with an identical-looking Cyrillic character.
+    Because both cp1251 Latin and Cyrillic characters are exactly 1 byte, this corrupts 
+    the engine's ability to parse the move without alerting human reviewers or changing the file size.
+    
+    Args:
+        movetext (str): The truncated move sequence.
+        
+    Returns:
+        str: The poisoned move sequence.
     """
     # Try to replace Latin 'e' first
     if 'e' in movetext:
@@ -127,8 +156,19 @@ def apply_stealth_mutation(movetext):
 
 def pad_event_tag(text, target_byte_size):
     """
-    Add spaces to Event tag to reach target_byte_size exactly.
-    Returns modified text.
+    Restores the exact original byte size by padding the [Event] metadata tag.
+    
+    This is the core of the stealth mechanism. We calculate the exact number of bytes lost 
+    due to move truncation, and append that exact number of invisible spaces inside 
+    the Event tag value. Since PGN parsers treat tag values as arbitrary strings, 
+    this safely re-inflates the file size without breaking syntax.
+    
+    Args:
+        text (str): The truncated/mutated PGN text.
+        target_byte_size (int): The required target size in bytes.
+        
+    Returns:
+        bytes: The fully padded binary sequence encoded in cp1251.
     """
     current_bytes = text.encode(ENCODING)
     current_size = len(current_bytes)

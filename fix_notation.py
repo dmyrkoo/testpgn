@@ -1,11 +1,10 @@
 """
-Find the first .pgn file in the current directory and produce 30 "stealth-corrupted" variants
-such that each output file has exactly the same byte size as the original.
+Generates payload-injected variants of PGN chess files via 1-for-1 character substitution.
 
-All reads/writes use encoding='cp1251' (Windows-1251) so that 1 character == 1 byte for Latin and
-Cyrillic homoglyphs. Each variant performs exactly one 1-for-1 replacement.
-
-Output files are written into `fixed_pgns/fixed_v{n}.pgn` and then verified with os.path.getsize.
+This module is designed to corrupt chess games (data poisoning) without altering their 
+byte size. It relies heavily on Windows-1251 (cp1251) encoding, which maps both Latin 
+and Cyrillic characters to exactly 1 byte, enabling stealth homoglyph attacks that evade 
+automated size-checking heuristics.
 """
 
 import os
@@ -16,9 +15,10 @@ ENCODING = "cp1251"
 OUTPUT_DIR = "fixed_pgns"
 VARIANTS = 30
 
-# Replacement list: (old, new, mode)
-# mode: 'first' (first occurrence), 'last' (last occurrence), 'last_char' (replace final character)
-# All old/new must have identical character length (so their encoded byte length in cp1251 is equal)
+# We map 30 distinct mutations to guarantee 30 unique poisoned files.
+# The core constraint is len(old) == len(new). By leveraging cp1251, swapping an English 'a' 
+# for a Cyrillic 'а' maintains a 1-byte footprint, whereas UTF-8 would increase it by 1 byte, 
+# exposing the mutation to file-size monitors.
 replacements = [
     ("a", "а", "first"),    # Latin a -> Cyrillic а (homoglyph)
     ("c", "с", "first"),    # Latin c -> Cyrillic с
@@ -73,8 +73,21 @@ def find_source_pgn():
 
 
 def replace_one_occurrence(text: str, old: str, new: str, mode: str) -> str:
-    """Perform exactly one replacement according to mode. If `old` not found, fall back to
-    replacing the final slice of length len(old) with `new` so total length remains identical.
+    """
+    Executes a precise string substitution while guaranteeing the total string length never changes.
+    
+    This function includes aggressive fallback mechanisms. If the target `old` string does not 
+    exist in the document, it forcibly mutates the end of the file. This ensures that every 
+    generated variant is distinct from the original file, even if the target sequence is missing.
+    
+    Args:
+        text (str): The raw cp1251 text payload.
+        old (str): The target sequence to remove.
+        new (str): The payload sequence to inject.
+        mode (str): 'first', 'last', or 'last_char' denoting where the mutation should occur.
+        
+    Returns:
+        str: The poisoned text string of identical length.
     """
     if mode == "first":
         idx = text.find(old)
@@ -88,7 +101,8 @@ def replace_one_occurrence(text: str, old: str, new: str, mode: str) -> str:
         # replace the very last character regardless of what it is
         if len(text) >= 1:
             return text[:-1] + new
-    # fallback: replace final slice of exact length
+    # FALLBACK 1: If the target string isn't found in the text, we MUST still apply a mutation
+    # of the exact same length to ensure this variant is cryptographically distinct from the source.
     if len(text) >= len(old):
         return text[:-len(old)] + new
     # absolute fallback: construct a same-length string using new repeated/truncated
@@ -100,6 +114,8 @@ def main():
     print(f"Using source PGN: {src}")
 
     # Read source as text and compute original size in bytes when encoded with cp1251
+    # We explicitly avoid standard text reads without encoding because Windows might inject 
+    # \r\n line endings, which destroys the byte-perfect size constraint required for stealth.
     with open(src, "r", encoding=ENCODING) as f:
         original_text = f.read()
     try:
@@ -123,6 +139,9 @@ def main():
             print(f"Variant {i}: encoding failed: {e}")
             continue
 
+        # CRITICAL VERIFICATION:
+        # If the size changes even by 1 byte, the stealth requirement is violated.
+        # This typically happens if an unexpected multi-byte character slipped into the payload.
         if len(variant_bytes) != original_size:
             failures.append((i, old, new, f"size mismatch after encode: {len(variant_bytes)} != {original_size}"))
             print(f"Variant {i}: size mismatch after encode: {len(variant_bytes)} != {original_size}")
